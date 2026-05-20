@@ -1,0 +1,64 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+      - name: Pin Python
+        run: uv python pin ${{ matrix.python }}
+      - name: Install dev tools
+        run: |
+          uv tool install ruff
+          uv tool install mypy
+          uv tool install pytest
+      - name: ruff check
+        run: |
+          ruff check \
+            .claude/hooks/python_evidence_gate.py \
+            .codex/hooks/python_evidence_core.py \
+            .codex/hooks/python_evidence_postuse.py \
+            .codex/hooks/python_evidence_stop.py \
+            .codex/hooks/python_evidence_userprompt.py \
+            .claude/hooks/tests/test_python_evidence_gate.py \
+            .codex/hooks/tests/test_python_evidence.py
+      - name: mypy
+        run: |
+          mypy --ignore-missing-imports \
+            .claude/hooks/python_evidence_gate.py \
+            .codex/hooks/python_evidence_core.py \
+            .codex/hooks/python_evidence_postuse.py \
+            .codex/hooks/python_evidence_stop.py \
+            .codex/hooks/python_evidence_userprompt.py
+      - name: pytest
+        run: pytest -q .claude/hooks/tests .codex/hooks/tests
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          additional_files: 'install.sh scripts/uninstall.sh'
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

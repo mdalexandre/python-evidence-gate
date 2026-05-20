@@ -1,0 +1,206 @@
+project:
+  slug: python-evidence-gate
+  title: Python Evidence Gate for AI Coding Agents
+  description: >
+    A pair of hook installations (one for Claude Code, one for Codex CLI) that
+    record every .py edit and every successful ruff/mypy/pytest invocation a
+    coding agent makes during a turn, and refuse to let the agent stop the turn
+    if any required evidence is missing or ran before the last edit. Includes
+    doctrine layer in CLAUDE.md/AGENTS.md, single-phase Stop hook for Claude,
+    two-phase (UserPromptSubmit + PostToolUse + Stop) trio for Codex, shared
+    library, ~45 tests, audit log, env-var override, idempotent install script.
+  context: personal
+  domains:
+    - software-engineering
+    - app-api-dev
+    - security
+    - ai-ml
+
+stack:
+  language: python-3.12
+  frameworks: []
+  datastores: []
+  infra:
+    - github-actions
+  package_manager: uv
+
+platform:
+  targets:
+    - cli
+  os_support:
+    - linux
+    - macos
+    - windows-wsl2
+    - windows-powershell-best-effort
+
+repo:
+  layout: single-app
+  directories:
+    - .
+    - .claude/hooks/
+    - .claude/hooks/tests/
+    - .codex/hooks/
+    - .codex/hooks/tests/
+    - scripts/
+    - docs/
+    - .github/workflows/
+  ci: github-actions
+  ci_matrix:
+    os: [ubuntu-latest, macos-latest]
+    python: ["3.11", "3.12"]
+    windows_ci_status: deferred-to-v1.1
+
+requirements:
+  functional:
+    - {id: FR-1,  summary: "Detect .py edits via Edit/Write/MultiEdit/NotebookEdit",        acceptance: "Audit log contains edit event with file_path, tool, source=tool"}
+    - {id: FR-2,  summary: "Detect .py mutation via shell redirects, tee, sed -i",          acceptance: "Audit log contains edit event with source=bash for known mutation patterns"}
+    - {id: FR-3,  summary: "Parse apply_patch payloads for *.py file paths (Codex)",        acceptance: "apply_patch with `*** Update File: path.py` emits an edit event"}
+    - {id: FR-4,  summary: "Recognize ruff check, reject ruff format and bare ruff",        acceptance: "ruff format does not satisfy gate; ruff check does"}
+    - {id: FR-5,  summary: "Recognize mypy and dmypy",                                      acceptance: "Either invocation satisfies the mypy slot"}
+    - {id: FR-6,  summary: "Recognize pytest (incl. python -m pytest)",                     acceptance: "Both forms satisfy the pytest slot"}
+    - {id: FR-7,  summary: "Normalize env, uv run [flags], python -m wrappers",             acceptance: "Wrapped invocations match; wrapped --version excluded"}
+    - {id: FR-8,  summary: "Reject checks that ran before the last .py edit",               acceptance: "Pre-edit ruff/mypy/pytest do not count"}
+    - {id: FR-9,  summary: "Reject failed-pipeline checks (whole pipeline rule)",           acceptance: "is_error=true or Exit code N prefix voids the segment"}
+    - {id: FR-10, summary: "Pytest required only when repo has tests",                      acceptance: "tests/ or test/ dir, or [tool.pytest...] in pyproject.toml, or test_*.py / *_test.py"}
+    - {id: FR-11, summary: "Block Stop with structured reason",                             acceptance: "stdout JSON: decision=block, reason names missing checks, suggests command, lists override"}
+    - {id: FR-12, summary: "PYTHON_EVIDENCE_GATE=0 env override",                           acceptance: "Override exits clean and audit-logs override_env"}
+    - {id: FR-13, summary: "stop_hook_active loop-safe",                                    acceptance: "Hook exits clean inside continuation"}
+    - {id: FR-14, summary: "UserPromptSubmit resets per-turn log (Codex)",                  acceptance: "Fresh prompt starts with empty events log"}
+  non_functional:
+    - {attribute: performance,        target: "Stop hook completes <200ms on 10k events; observed ~80ms"}
+    - {attribute: performance,        target: "repo_has_tests bounded to depth 4 and 5000 files"}
+    - {attribute: security,           target: "No file content, env vars, or secrets in audit log or stdout"}
+    - {attribute: security,           target: "Fail-open on any internal exception"}
+    - {attribute: security,           target: "Malformed stdin JSON exits 0 without crash"}
+    - {attribute: security,           target: "No eval/exec/shell of transcript content"}
+    - {attribute: reliability,        target: "Loop-safe under stop_hook_active=true"}
+    - {attribute: reliability,        target: "Idempotent install (no duplicate registration)"}
+    - {attribute: reliability,        target: "Timestamped backup of every modified config"}
+    - {attribute: usability,          target: "One-line install command"}
+    - {attribute: usability,          target: "Block message self-describing (no external docs needed)"}
+    - {attribute: maintainability,    target: "Codex suite >=25 tests passing; Claude suite >=18"}
+    - {attribute: maintainability,    target: "mypy --ignore-missing-imports clean"}
+    - {attribute: maintainability,    target: "ruff check clean"}
+    - {attribute: maintainability,    target: "Audit log on every pass/block/override"}
+    - {attribute: portability,        target: "Ubuntu 22.04+, Fedora 39+, macOS 14+ first-class"}
+    - {attribute: portability,        target: "Windows WSL2 supported; PowerShell best-effort"}
+    - {attribute: portability,        target: "No runtime network dependency"}
+    - {attribute: compatibility,      target: "Appends to existing hooks.Stop / hooks.PostToolUse arrays"}
+    - {attribute: compatibility,      target: "Claude and Codex installs share no files; separate audit logs"}
+    - {attribute: functional_suitability, target: "Every FR implemented and covered by a test"}
+  apis:
+    - {name: "ClaudeStopPayload",    style: "json-stdin",  spec_path: "docs/SCHEMAS.md#claude-stop"}
+    - {name: "CodexStopPayload",     style: "json-stdin",  spec_path: "docs/SCHEMAS.md#codex-stop"}
+    - {name: "CodexPostToolUse",     style: "json-stdin",  spec_path: "docs/SCHEMAS.md#codex-posttooluse"}
+    - {name: "BlockResponse",        style: "json-stdout", spec_path: "docs/SCHEMAS.md#block-response"}
+    - {name: "EventsLogJsonl",       style: "jsonl-file",  spec_path: "docs/SCHEMAS.md#events-log"}
+    - {name: "AuditLogJsonl",        style: "jsonl-file",  spec_path: "docs/SCHEMAS.md#audit-log"}
+
+testing:
+  strategy:
+    - unit
+    - integration
+    - smoke
+  frameworks:
+    - pytest@9.0
+    - pytest-cov
+  coverage_target: "none-gated"
+  security_tests:
+    - threat-model-review
+    - secure-coding-review
+    - shell-quoting-via-shellcheck
+
+security:
+  threat_model: stride
+  controls:
+    - owasp-asvs-v14-config
+    - owasp-asvs-v8-data-protection
+    - nist-ssdf-ps1
+    - nist-ssdf-ps3
+    - shellcheck-sc2086-sc2068
+  malware_protection_relevant: false
+  hacking_protection_relevant: false
+  notes:
+    - "Gate is a guardrail on the AGENT's output, not a security tool against external attackers."
+    - "Within trust boundary: assumes the agent's tool_result.is_error is faithful."
+    - "Out of trust boundary: a compromised agent could spoof check events; this is acknowledged."
+
+project_management:
+  methodology: agile-iterative
+  iteration_length_weeks: 1
+  team_size: 1
+  deadline: null
+  milestones:
+    - {name: "M1: Core hooks working",        target_date: "2026-05-20",  deliverables: ["Claude+Codex hooks installed on author's machine", "tests passing"]}
+    - {name: "M2: SPR + manifest",            target_date: "2026-05-20",  deliverables: ["SPR-python-evidence-gate.md", "SPR-python-evidence-gate.manifest.yaml"]}
+    - {name: "M3: Public repo scaffold",      target_date: "+7 days",     deliverables: ["install.sh", "Makefile", ".github/workflows/ci.yml", "README.md", "LICENSE"]}
+    - {name: "M4: v1.0 release",              target_date: "+14 days",    deliverables: ["tagged release", "signed tarball", "README screenshots", "CHANGELOG.md"]}
+    - {name: "M5: v1.1 Windows CI",           target_date: "+30 days",    deliverables: ["windows-latest in CI matrix", "install.ps1", "docs/WINDOWS.md validated"]}
+    - {name: "M6: v2.0 per-file granularity", target_date: "TBD",         deliverables: ["per-file evidence tracking", "exit-code per-segment"]}
+
+risks:
+  - {id: R-1,  description: "Vendor schema change: new edit tool not in EDIT_TOOLS",        likelihood: 4, impact: 4, mitigation: "CI smoke against latest CLIs; Bash mutation fallback; issue template captures tool name"}
+  - {id: R-2,  description: "Vendor schema change: tool_response loses is_error",          likelihood: 3, impact: 4, mitigation: "result_is_failure defensively checks is_error, exit_code, content prefix"}
+  - {id: R-3,  description: "Regex false-positive on filenames in prose",                  likelihood: 2, impact: 2, mitigation: "argv[0] head-position check; tests cover echo/heredoc cases"}
+  - {id: R-4,  description: "Regex false-negative on exotic .py mutation paths",           likelihood: 3, impact: 3, mitigation: "Documented v3 work; pytest runtime path satisfies gate"}
+  - {id: R-5,  description: "Concurrency: parallel Codex sessions share `current` log",    likelihood: 2, impact: 3, mitigation: "CODEX_SESSION_ID per shell; v2 PPID-based scoping"}
+  - {id: R-6,  description: "Hook timeout on pathological transcripts",                    likelihood: 1, impact: 3, mitigation: "os.walk depth 4 + 5000 file cutoff"}
+  - {id: R-7,  description: "Permission error writing /tmp/codex-python-evidence/",        likelihood: 1, impact: 3, mitigation: "mkdir parents=True, exist_ok=True; OSError fall-through fail-open"}
+  - {id: R-8,  description: "Audit log unbounded growth",                                  likelihood: 2, impact: 2, mitigation: "Documented manual rotation; v2 built-in rotation"}
+  - {id: R-9,  description: "Supply chain: malicious typosquatted ruff/mypy/pytest wheel", likelihood: 1, impact: 5, mitigation: "Install via official uv tool install; README recommends version pin"}
+  - {id: R-10, description: "License contamination from contributors",                     likelihood: 2, impact: 4, mitigation: "DCO required; CI rejects unsigned PRs"}
+  - {id: R-11, description: "Vendor deprecates hooks subsystem",                           likelihood: 1, impact: 5, mitigation: "No announced deprecation; portable design; ~1 day re-port"}
+  - {id: R-12, description: "Documentation drift between SPR and code",                    likelihood: 3, impact: 2, mitigation: "SPR is authoritative; PRs touching code require SPR update at review"}
+
+deliverables:
+  spr_report_path: ./SPR-python-evidence-gate.md
+  manifest_path: ./SPR-python-evidence-gate.manifest.yaml
+  reference_repo_layout:
+    - LICENSE                                 # MIT
+    - README.md                               # one-screen quickstart
+    - SPR-python-evidence-gate.md             # this report
+    - SPR-python-evidence-gate.manifest.yaml  # this manifest
+    - install.sh                              # one-line installer
+    - Makefile                                # uninstall, test, release
+    - pyproject.toml                          # ruff/mypy/pytest config
+    - .claude/hooks/python_evidence_gate.py
+    - .claude/hooks/tests/test_python_evidence_gate.py
+    - .codex/hooks/python_evidence_core.py
+    - .codex/hooks/python_evidence_userprompt.py
+    - .codex/hooks/python_evidence_postuse.py
+    - .codex/hooks/python_evidence_stop.py
+    - .codex/hooks/tests/test_python_evidence.py
+    - docs/WINDOWS.md
+    - docs/THREATMODEL.md
+    - docs/CONTRIBUTING.md
+    - docs/CHANGELOG.md
+    - docs/SCHEMAS.md
+    - docs/reviews/codex-2026-05-20.md
+    - scripts/smoke.sh
+    - .github/workflows/ci.yml
+    - .github/workflows/release.yml
+
+references_summary:
+  librarian_used:
+    - {title: "Software Requirements, 3rd ed.",                  author: "Wiegers, Beatty"}
+    - {title: "Software Requirements Essentials",                author: "Wiegers, Beatty"}
+    - {title: "Architecture Patterns with Python",               author: "Percival, Gregory"}
+    - {title: "Threat Modeling: Designing for Security",         author: "Shostack"}
+    - {title: "Alice and Bob Learn Application Security",        author: "Janca"}
+    - {title: "Agile Software Requirements",                     author: "Leffingwell"}
+    - {title: "Classic Shell Scripting",                         author: "Robbins"}
+    - {title: "Hacking APIs",                                    author: "Ball"}
+    - {title: "Fundamentals of Data Engineering",                author: "Reis, Housley"}
+  live_sources_used:
+    - {title: "Claude Code Hooks reference",                     venue: "Anthropic docs",   year: 2026}
+    - {title: "ISO/IEC 25010:2011",                              venue: "ISO/IEC",          year: 2011}
+    - {title: "ISO/IEC/IEEE 12207:2017",                         venue: "ISO/IEC/IEEE",     year: 2017}
+    - {title: "IEEE 829-2008",                                   venue: "IEEE",             year: 2008}
+    - {title: "NIST SP 800-218 (SSDF)",                          venue: "NIST",             year: 2022}
+    - {title: "OWASP ASVS 4.0.3",                                venue: "OWASP",            year: 2022}
+    - {title: "OWASP Top 10",                                    venue: "OWASP",            year: 2021}
+    - {title: "OWASP API Security Top 10",                       venue: "OWASP",            year: 2023}
+    - {title: "RFC 8259 JSON",                                   venue: "IETF",             year: 2017}
+    - {title: "PEP 8 Style Guide",                               venue: "python.org",       year: 2001}
+    - {title: "PEP 621 pyproject.toml metadata",                 venue: "python.org",       year: 2020}
+    - {title: "ShellCheck wiki (SC2086, SC2068)",                venue: "shellcheck.net",   year: 2024}

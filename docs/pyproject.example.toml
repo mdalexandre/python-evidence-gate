@@ -1,0 +1,16 @@
+# Example pyproject.toml block to append to a Python project where you want
+# the gate's runtime tools available via `uv run`. Lean by design.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]

@@ -1,0 +1,5 @@
+title = "python-evidence-gate secrets baseline"
+
+[allowlist]
+description = "Allowlist for known false positives"
+paths = ['''tests/fixtures/.*''', '''docs/.*''']
