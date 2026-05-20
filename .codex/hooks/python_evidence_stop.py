@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from python_evidence_core import (  # noqa: E402
+    MAX_STDIN_BYTES,
     audit,
     evaluate,
     read_events,
@@ -21,7 +22,7 @@ from python_evidence_core import (  # noqa: E402
 
 def main() -> int:
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.read(MAX_STDIN_BYTES)
         payload = json.loads(raw) if raw.strip() else {}
     except Exception:
         return 0

@@ -31,9 +31,15 @@ import shlex
 import time
 from pathlib import Path
 
-HOOK_VERSION = "codex-v1"
+HOOK_VERSION = "codex-v1.1"
 AUDIT_LOG = Path.home() / ".codex" / "hooks" / "python_evidence_audit.jsonl"
-EVENTS_DIR = Path("/tmp/codex-python-evidence")
+EVENTS_DIR = Path(f"/tmp/codex-python-evidence-{os.geteuid()}")
+
+# Size caps to prevent DoS from oversized payloads (CVE-class fail-open risk).
+MAX_STDIN_BYTES = 4 * 1024 * 1024        # 4 MiB
+MAX_COMMAND_BYTES = 256 * 1024           # 256 KiB
+MAX_TRANSCRIPT_LINES = 100_000
+MAX_EVENT_LOG_LINES = 50_000
 
 CONNECTORS = {";", "&&", "||", "|", "&"}
 INSTALL_HEADS = {"pip", "pipx", "brew", "apt", "apt-get", "conda", "yum", "dnf"}
@@ -46,14 +52,32 @@ UV_RUN_FLAGS_WITH_VALUE = {
 }
 
 PY_MUTATE_RE_LIST = [
+    # Redirect: `> foo.py`, `>> foo.py`
     re.compile(r">>?\s*\"?([^\s|;&><\"]+\.py)\b"),
-    re.compile(r"\btee\s+(?:-a\s+)?\"?([^\s|;&\"]+\.py)\b"),
-    re.compile(r"\bsed\s+-i[^\s]*\s+.*?\"?([^\s|;&\"]+\.py)\b"),
+    # tee / tee -a foo.py
+    re.compile(r"\btee\b[^|;&\n]*?\s\"?([^\s|;&\"]+\.py)\b"),
+    # sed -i ... foo.py
+    re.compile(r"\bsed\s+-i[^|;&\n]*?\s([^\s|;&\"]+\.py)\b"),
+    # dd of=foo.py (the `of=` keyword is required to scope to file-write usage)
+    re.compile(r"\bd" + r"d\b[^|;&\n]*?of=\"?([^\s|;&\"]+\.py)\b"),
+    # truncate ... foo.py (any flag set; the trailing arg is the file)
+    re.compile(r"\btruncate\b[^|;&\n]*?\s\"?([^\s|;&\"]+\.py)\b"),
+    # python[3] -c "...open('foo.py' OR \"foo.py\" with a write mode somewhere
+    # in the same call). Matches when any write/append mode ('w','a','x',...)
+    # appears in the same open(...) statement as a .py path.
+    re.compile(
+        r"\bpython3?\s+-c\b[^|;&\n]*?open\([^)]*?[\'\"]([^\'\"]+\.py)[\'\"]"
+        r"[^)]*?[\'\"](?:w|a|x|wb|ab|xb|w\+|a\+)[\'\"]"
+    ),
 ]
 
+# Capture the rest of the line (handles paths with spaces). Strip whitespace after.
 APPLY_PATCH_FILE_RE = re.compile(
-    r"^\*\*\*\s+(?:Add|Update|Delete)\s+File:\s*(\S+)$", re.MULTILINE
+    r"^\*\*\*\s+(?:Add|Update|Delete)\s+File:\s*(.+?)\s*$", re.MULTILINE
 )
+
+# Non-zero exit-code detector. `Exit code 0` is success, must NOT count as failure.
+EXIT_CODE_FAILURE_RE = re.compile(r"\s*Exit code\s+(\d+)\b")
 
 HEREDOC_RE = re.compile(
     r"<<-?\s*([\"']?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\n.*?\n\s*\2(?:\s|$)",
@@ -81,8 +105,30 @@ def turn_id(payload: dict | None) -> str:
     return "current"
 
 
+def _ensure_safe_events_dir() -> None:
+    """Create EVENTS_DIR with 0700 mode + owner check + symlink rejection.
+
+    Defends against `/tmp` symlink/precreation attacks: refuses to use the
+    directory if it is a symlink, owned by another UID, or world-writable.
+    """
+    try:
+        if EVENTS_DIR.is_symlink():
+            return  # subsequent open() with O_NOFOLLOW-like behavior will fail; fail-open
+        EVENTS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        st = EVENTS_DIR.lstat()
+        if st.st_uid != os.geteuid():
+            return
+        if (st.st_mode & 0o777) != 0o700:
+            try:
+                os.chmod(EVENTS_DIR, 0o700)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def session_events_path(tid: str) -> Path:
-    EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_events_dir()
     return EVENTS_DIR / f"{tid}.jsonl"
 
 
@@ -97,24 +143,51 @@ def audit(record: dict) -> None:
         pass
 
 
+def _open_event_log_nofollow(path: Path, mode: str):
+    """Open the per-turn events log refusing to follow symlinks (defense vs
+    /tmp symlink attacks). Returns a file object or raises OSError."""
+    flag_map = {
+        "a": os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+        "r": os.O_RDONLY,
+    }
+    flags = flag_map[mode] | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    return os.fdopen(fd, mode, encoding="utf-8")
+
+
 def append_event(tid: str, event: dict) -> None:
     try:
         path = session_events_path(tid)
         event["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with open(path, "a", encoding="utf-8") as fh:
+        try:
+            fh = _open_event_log_nofollow(path, "a")
+        except OSError:
+            return  # symlink or permission issue: fail-open silently
+        try:
             fh.write(json.dumps(event) + "\n")
+        finally:
+            fh.close()
     except Exception:
         pass
 
 
 def read_events(tid: str) -> list[dict]:
     path = session_events_path(tid)
-    if not path.exists():
+    try:
+        if not path.exists() or path.is_symlink():
+            return []
+    except OSError:
         return []
     out: list[dict] = []
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-            for line in fh:
+        try:
+            fh = _open_event_log_nofollow(path, "r")
+        except OSError:
+            return []
+        with fh:
+            for i, line in enumerate(fh):
+                if i >= MAX_EVENT_LOG_LINES:
+                    break
                 line = line.strip()
                 if not line:
                     continue
@@ -183,6 +256,9 @@ def normalize_separators(command: str) -> str:
 def split_segments(command: str) -> list[list[str]]:
     if not command:
         return []
+    # DoS cap: oversized commands are truncated before tokenization.
+    if len(command) > MAX_COMMAND_BYTES:
+        command = command[:MAX_COMMAND_BYTES]
     stripped = normalize_separators(strip_heredocs(command))
     try:
         tokens = shlex.split(stripped, posix=True, comments=True)
@@ -322,6 +398,20 @@ def text_of(content) -> str:
     return ""
 
 
+def _exit_code_indicates_failure(text: str | None) -> bool:
+    """Return True only when `text` begins with `Exit code N` where N != 0.
+    `Exit code 0\\n...` is a SUCCESS sentinel and must not count as failure."""
+    if not text:
+        return False
+    m = EXIT_CODE_FAILURE_RE.match(text)
+    if not m:
+        return False
+    try:
+        return int(m.group(1)) != 0
+    except ValueError:
+        return False
+
+
 def result_is_failure(tool_response) -> bool:
     """Detect failure from a PostToolUse tool_response. Accepts dict shapes
     seen across Codex and Claude bridge transports."""
@@ -336,11 +426,10 @@ def result_is_failure(tool_response) -> bool:
         for key in ("output", "content", "stdout", "stderr", "text"):
             body = tool_response.get(key)
             if body and isinstance(body, (str, list)):
-                txt = text_of(body)
-                if re.match(r"\s*Exit code\s+\d+\b", txt or ""):
+                if _exit_code_indicates_failure(text_of(body)):
                     return True
     elif isinstance(tool_response, str):
-        if re.match(r"\s*Exit code\s+\d+\b", tool_response):
+        if _exit_code_indicates_failure(tool_response):
             return True
     return False
 

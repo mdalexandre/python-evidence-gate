@@ -106,6 +106,18 @@ def test_detect_apply_patch_py_edits() -> None:
     assert "/tmp/z.md" not in edits
 
 
+def test_detect_apply_patch_py_edits_with_spaces_in_path() -> None:
+    """v1.1: paths with spaces must be captured (previously dropped at first space)."""
+    patch = (
+        "*** Begin Patch\n"
+        "*** Update File: dir/file name.py\n"
+        "@@ ...\n"
+        "*** End Patch\n"
+    )
+    edits = detect_apply_patch_py_edits(patch)
+    assert "dir/file name.py" in edits
+
+
 def test_result_is_failure_signals() -> None:
     assert result_is_failure({"is_error": True}) is True
     assert result_is_failure({"exit_code": 2}) is True
@@ -113,6 +125,26 @@ def test_result_is_failure_signals() -> None:
     assert result_is_failure({"is_error": False, "output": "ok"}) is False
     assert result_is_failure(None) is False
     assert result_is_failure("Exit code 7\nfail") is True
+
+
+def test_result_is_failure_exit_code_zero_is_success() -> None:
+    """v1.1: `Exit code 0\\n...` is SUCCESS and must NOT be treated as failure."""
+    assert result_is_failure({"is_error": False, "output": "Exit code 0\nok"}) is False
+    assert result_is_failure("Exit code 0\nall good") is False
+    # Sanity: still detects real failures
+    assert result_is_failure("Exit code 1\nbad") is True
+    assert result_is_failure("Exit code 137\nkilled") is True
+
+
+def test_detect_bash_py_edits_dd_truncate_python_dash_c() -> None:
+    """v1.1: dd, truncate, python -c open() patterns now detected."""
+    assert detect_bash_py_edits("dd if=/dev/null of=/tmp/d.py bs=1") == ["/tmp/d.py"]
+    assert detect_bash_py_edits("truncate -s 0 /tmp/t.py") == ["/tmp/t.py"]
+    assert detect_bash_py_edits(
+        "python3 -c \"open('/tmp/p.py','w').write('x')\""
+    ) == ["/tmp/p.py"]
+    # negative: bare python with no open(...) does not match
+    assert detect_bash_py_edits("python3 -c 'print(1)'") == []
 
 
 def test_normalize_argv_strips_env_prefix() -> None:

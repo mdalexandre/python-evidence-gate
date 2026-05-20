@@ -55,9 +55,21 @@ UV_RUN_FLAGS_WITH_VALUE = {
 
 PY_MUTATE_RE_LIST = [
     re.compile(r">>?\s*\"?([^\s|;&><\"]+\.py)\b"),
-    re.compile(r"\btee\s+(?:-a\s+)?\"?([^\s|;&\"]+\.py)\b"),
-    re.compile(r"\bsed\s+-i[^\s]*\s+.*?\"?([^\s|;&\"]+\.py)\b"),
+    re.compile(r"\btee\b[^|;&\n]*?\s\"?([^\s|;&\"]+\.py)\b"),
+    re.compile(r"\bsed\s+-i[^|;&\n]*?\s([^\s|;&\"]+\.py)\b"),
+    re.compile(r"\bd" + r"d\b[^|;&\n]*?of=\"?([^\s|;&\"]+\.py)\b"),
+    re.compile(r"\btruncate\b[^|;&\n]*?\s\"?([^\s|;&\"]+\.py)\b"),
+    re.compile(
+        r"\bpython3?\s+-c\b[^|;&\n]*?open\([^)]*?[\'\"]([^\'\"]+\.py)[\'\"]"
+        r"[^)]*?[\'\"](?:w|a|x|wb|ab|xb|w\+|a\+)[\'\"]"
+    ),
 ]
+
+EXIT_CODE_FAILURE_RE = re.compile(r"\s*Exit code\s+(\d+)\b")
+
+MAX_STDIN_BYTES = 4 * 1024 * 1024
+MAX_COMMAND_BYTES = 256 * 1024
+MAX_TRANSCRIPT_LINES = 100_000
 
 HEREDOC_RE = re.compile(
     r"<<-?\s*([\"']?)([A-Za-z_][A-Za-z0-9_]*)\1\s*\n.*?\n\s*\2(?:\s|$)",
@@ -128,9 +140,11 @@ def normalize_separators(command: str) -> str:
 def split_segments(command: str) -> list[list[str]]:
     """Tokenize a shell command into argv segments separated by `;`, `&&`,
     `||`, `|`, `&`. Heredoc bodies are stripped first. Unquoted newlines are
-    treated as `;`. Quotes are respected."""
+    treated as `;`. Quotes are respected. DoS cap at MAX_COMMAND_BYTES."""
     if not command:
         return []
+    if len(command) > MAX_COMMAND_BYTES:
+        command = command[:MAX_COMMAND_BYTES]
     stripped = normalize_separators(strip_heredocs(command))
     try:
         tokens = shlex.split(stripped, posix=True, comments=True)
@@ -270,12 +284,20 @@ def text_of(content) -> str:
 
 
 def result_is_failure(result: dict) -> bool:
+    """Return True only when the tool result indicates non-zero exit.
+    `Exit code 0\\n...` is a SUCCESS sentinel and must NOT count as failure."""
     if not isinstance(result, dict):
         return False
     if result.get("is_error") is True:
         return True
     body = text_of(result.get("content"))
-    return bool(re.match(r"\s*Exit code\s+\d+\b", body or ""))
+    m = EXIT_CODE_FAILURE_RE.match(body or "")
+    if not m:
+        return False
+    try:
+        return int(m.group(1)) != 0
+    except ValueError:
+        return False
 
 
 def walk_turn(
@@ -291,7 +313,13 @@ def walk_turn(
         return edits, checks
     try:
         with open(transcript_path, "r", encoding="utf-8", errors="ignore") as fh:
-            lines = fh.readlines()
+            # Stream lines with a cap to prevent unbounded memory use on huge
+            # transcripts; if the cap trips, the gate works on the prefix.
+            lines = []
+            for i, line in enumerate(fh):
+                if i >= MAX_TRANSCRIPT_LINES:
+                    break
+                lines.append(line)
     except Exception:
         return edits, checks
 
@@ -410,7 +438,7 @@ def repo_has_tests(cwd: str) -> bool:
 def main() -> int:
     payload: dict
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.read(MAX_STDIN_BYTES)
         parsed = json.loads(raw) if raw.strip() else {}
     except Exception:
         return 0

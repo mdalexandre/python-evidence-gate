@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
-# install.sh — one-line installer for python-evidence-gate.
-# Idempotent: re-running is safe. Backs up every modified config.
+# install.sh — installer for python-evidence-gate.
+#
+# Recommended install pattern (audit-first):
+#   curl -fsSL https://raw.githubusercontent.com/mdalexandre/python-evidence-gate/main/install.sh -o /tmp/peg.sh
+#   less /tmp/peg.sh   # read what it does
+#   bash /tmp/peg.sh
+#
+# The faster `curl ... | bash` form works but does not let you audit the
+# bytes that will execute. Use it only if you trust the repo + transport.
+#
+# Idempotent: re-running is safe. Backs up every modified config with a
+# timestamped sibling. Pins ruff/mypy/pytest to known-good versions
+# (override via RUFF_PIN/MYPY_PIN/PYTEST_PIN env vars).
 # Supports: Linux, macOS. Windows users see docs/WINDOWS.md.
 
 set -euo pipefail
@@ -23,20 +34,24 @@ ensure_uv() {
 
 ensure_tools() {
   ensure_uv
-  for tool in ruff mypy; do
-    if have "$tool"; then
-      log "$tool already present"
+  # Version pins (v1.1): explicit pinning defends against silent upstream
+  # regression or supply-chain compromise of these tools. Bump these by hand
+  # after reviewing the upstream changelog.
+  RUFF_PIN="${RUFF_PIN:-0.15.13}"
+  MYPY_PIN="${MYPY_PIN:-2.1.0}"
+  PYTEST_PIN="${PYTEST_PIN:-9.0.3}"
+  install_pinned() {
+    local name="$1" pin="$2"
+    if have "$name"; then
+      log "$name already present (gate accepts current install)"
     else
-      log "uv tool install $tool"
-      uv tool install "$tool"
+      log "uv tool install ${name}@${pin}"
+      uv tool install "${name}@${pin}"
     fi
-  done
-  if have pytest; then
-    log "pytest already present"
-  else
-    log "uv tool install pytest"
-    uv tool install pytest
-  fi
+  }
+  install_pinned ruff "$RUFF_PIN"
+  install_pinned mypy "$MYPY_PIN"
+  install_pinned pytest "$PYTEST_PIN"
 }
 
 backup() {
@@ -81,6 +96,12 @@ if not already:
 else:
     print("ALREADY-REGISTERED")
 PY
+
+  # Post-write validation: refuse to leave a broken settings.json.
+  if ! python3 -m json.tool "${CLAUDE_DIR}/settings.json" > /dev/null 2>&1; then
+    log "ERROR: ${CLAUDE_DIR}/settings.json is invalid JSON after registration; restore from .bak-pre-python-evidence-${TS}"
+    return 1
+  fi
 
   install_doctrine "${CLAUDE_DIR}/CLAUDE.md" "Python Tooling Loop" claude
 }
@@ -137,6 +158,11 @@ if append("Stop", None, "python_evidence_stop.py",
 p.write_text(json.dumps(s, indent=2) + "\n")
 print(f"REGISTERED: {added or 'nothing (already in place)'}")
 PY
+
+  if ! python3 -m json.tool "${CODEX_DIR}/hooks.json" > /dev/null 2>&1; then
+    log "ERROR: ${CODEX_DIR}/hooks.json is invalid JSON after registration; restore from .bak-pre-python-evidence-${TS}"
+    return 1
+  fi
 
   install_doctrine "${CODEX_DIR}/AGENTS.md" "Python Tooling Loop" codex
 }

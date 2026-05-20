@@ -10,12 +10,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from python_evidence_core import audit, reset_events, turn_id  # noqa: E402
+from python_evidence_core import MAX_STDIN_BYTES, audit, reset_events, turn_id  # noqa: E402
 
 
 def main() -> int:
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.read(MAX_STDIN_BYTES)
         payload = json.loads(raw) if raw.strip() else {}
     except Exception:
         return 0

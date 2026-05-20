@@ -298,6 +298,44 @@ def test_bash_sed_inplace_counts_as_edit(tmp_path: Path) -> None:
     assert "foo.py" in payload["reason"]
 
 
+def test_bash_dd_truncate_python_c_count_as_edits(tmp_path: Path) -> None:
+    """v1.1: dd of=, truncate, python -c open() patterns are now detected."""
+    for cmd, expected in [
+        ("dd if=/dev/null of=/tmp/d.py bs=1", "d.py"),
+        ("truncate -s 0 /tmp/t.py", "t.py"),
+        ("python3 -c \"open('/tmp/p.py','w').write('x')\"", "p.py"),
+    ]:
+        transcript = tmp_path / f"t-{expected}.jsonl"
+        records = [_user("shell mutate")]
+        records += _bash_ok(cmd)
+        _write_transcript(transcript, records)
+        rc, out = _run(transcript, _no_tests_dir(tmp_path))
+        assert rc == 0
+        payload = _expect_block(out)
+        assert expected in payload["reason"], (cmd, payload["reason"])
+
+
+def test_exit_code_zero_is_treated_as_success(tmp_path: Path) -> None:
+    """v1.1: a tool_result whose content begins with `Exit code 0` is SUCCESS.
+
+    Pre-v1.1 the matcher rejected any `Exit code N` prefix, so successful
+    runs that echoed `Exit code 0` were misclassified as failures and their
+    check evidence was discarded.
+    """
+    transcript = tmp_path / "t.jsonl"
+    records = [_user("edit foo.py"), _edit("/tmp/foo.py")]
+    # bash_ok content begins empty; simulate the `Exit code 0` prefix that
+    # some Claude Code transports prepend on success.
+    rec_r, tid_r = _bash("ruff check .")
+    records += [rec_r, _result(tid_r, is_error=False, content="Exit code 0\nAll checks passed!\n")]
+    rec_m, tid_m = _bash("mypy .")
+    records += [rec_m, _result(tid_m, is_error=False, content="Exit code 0\nSuccess\n")]
+    _write_transcript(transcript, records)
+    rc, out = _run(transcript, _no_tests_dir(tmp_path))
+    assert rc == 0
+    assert out.strip() == "", f"expected pass, got {out!r}"
+
+
 def test_echo_label_does_not_count_as_invocation(tmp_path: Path) -> None:
     """`echo '=== ruff check ==='` must not satisfy the ruff requirement."""
     transcript = tmp_path / "t.jsonl"

@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from python_evidence_core import (  # noqa: E402
+    MAX_STDIN_BYTES,
     append_event,
     audit,
     detect_apply_patch_py_edits,
@@ -37,7 +38,7 @@ def main() -> int:
     if os.environ.get("PYTHON_EVIDENCE_GATE") == "0":
         return 0
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.read(MAX_STDIN_BYTES)
         payload = json.loads(raw) if raw.strip() else {}
     except Exception:
         return 0
