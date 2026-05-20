@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-HOOK = Path.home() / ".claude" / "hooks" / "python_evidence_gate.py"
+HOOK = Path(__file__).resolve().parent.parent / "python_evidence_gate.py"
 
 _id_counter = itertools.count(1)
 

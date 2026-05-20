@@ -9,7 +9,7 @@ import sys
 import uuid
 from pathlib import Path
 
-HOOKS_DIR = Path.home() / ".codex" / "hooks"
+HOOKS_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HOOKS_DIR))
 
 from python_evidence_core import (  # noqa: E402
